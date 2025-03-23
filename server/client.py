@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 import time
 import logging
-from models import CacheStats, ResetResponse, StatsResponse
+from models import CacheStats, StatsResponse
 import hashlib
 
 from prom_client import PromMetricsClient
@@ -18,30 +18,43 @@ if not BWSC_URL:
     logger.critical("BWS_CACHE_URL not set")
     sys.exit(1)
 
+
 def generate_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
 
 @dataclass
 class SecretResponse:
     value: str
     status_code: int
 
+
 class BwscClient:
     def __init__(self, token: str):
         self.token = token
 
     def get_secret_by_id(self, secret_id: str):
-        value = requests.get(f'{BWSC_URL}/id/{secret_id}', headers={"Authorization": f"Bearer {self.token}"}, timeout=1)
+        value = requests.get(
+            f"{BWSC_URL}/id/{secret_id}",
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=1,
+        )
         return SecretResponse(value=value.text, status_code=value.status_code)
 
     def get_secret_by_key(self, secret_key: str):
-        value = requests.get(f"{BWSC_URL}/key/{secret_key}", headers={"Authorization": f"Bearer {self.token}"}, timeout=1)
+        value = requests.get(
+            f"{BWSC_URL}/key/{secret_key}",
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=1,
+        )
         return SecretResponse(value=value.text, status_code=value.status_code)
+
 
 @dataclass
 class CachedSecret:
     value: SecretResponse
     last_requested: float
+
 
 class BwscCachedClient:
     def __init__(self, token: str, prom_clien: PromMetricsClient):
@@ -55,11 +68,13 @@ class BwscCachedClient:
         return BwscClient(token)
 
     def reset_cache(self):
-        before = CacheStats(secret_cache_size=len(self.secret_id_cache), keymap_cache_size=len(self.secret_key_cache))
+        before = CacheStats(
+            secret_cache_size=len(self.secret_id_cache),
+            keymap_cache_size=len(self.secret_key_cache),
+        )
         self.secret_id_cache = {}
         self.secret_key_cache = {}
         return before
-
 
     def get_secret_by_id(self, secret_id: str):
         cached_secret = None
@@ -100,7 +115,11 @@ class BwscCachedClient:
         return cached_secret.value
 
     def stats(self):
-        return CacheStats(secret_cache_size=len(self.secret_id_cache), keymap_cache_size=len(self.secret_key_cache))
+        return CacheStats(
+            secret_cache_size=len(self.secret_id_cache),
+            keymap_cache_size=len(self.secret_key_cache),
+        )
+
 
 class ClientManager:
     def __init__(self, prom_client: PromMetricsClient):
@@ -124,5 +143,7 @@ class ClientManager:
         return StatsResponse(
             num_clients=len(self.clients),
             client_stats=client_stats,
-            total_stats=CacheStats(secret_cache_size=total_secret_id, keymap_cache_size=total_secret_key),
+            total_stats=CacheStats(
+                secret_cache_size=total_secret_id, keymap_cache_size=total_secret_key
+            ),
         )

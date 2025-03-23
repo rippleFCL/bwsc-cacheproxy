@@ -1,4 +1,3 @@
-import functools
 import logging
 import os
 import time
@@ -100,6 +99,7 @@ def handle_auth(authorization: Annotated[str, Header()]):
         return authorization.split()[-1]
     raise HTTPException(status_code=401, detail="Invalid token")
 
+
 @api.get(
     "/reset",
     response_model=ResetResponse,
@@ -133,8 +133,6 @@ def get_id(authorization: Annotated[str, Depends(handle_auth)], secret_id: str):
     client = client_manager.get_client_by_token(authorization)
     secret = client.get_secret_by_id(secret_id)
     return Response(content=secret.value, status_code=secret.status_code)
-
-
 
 
 @api.get(
