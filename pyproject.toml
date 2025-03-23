@@ -1,0 +1,23 @@
+[project]
+name = "bwscache-cache"
+version = "0.1.0"
+description = "a cache for bwscache"
+authors = [
+    {name = "ripple",email = "github@ripple.contact"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi (>=0.115.11,<0.116.0)",
+    "prometheus-client (>=0.21.1,<0.22.0)",
+    "uvicorn (>=0.34.0,<0.35.0)",
+    "requests (>=2.32.3,<3.0.0)"
+
+]
+[tool.poetry]
+package-mode = false
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
