@@ -1,4 +1,5 @@
 import sys
+import threading
 import requests
 import os
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ logger = logging.getLogger(__name__)
 BWSC_URL = os.environ.get("BWS_CACHE_URL")
 SECRET_TTL = int(os.environ.get("SECRET_TTL", 15))
 KEEP_ON_CONN_FAIL = os.environ.get("KEEP_ON_CONN_FAIL", "false").lower() == "true"
+BACKGROUND_REFRESH = os.environ.get("BACKGROUND_REFRESH", "false").lower() == "true"
+
 if not BWSC_URL:
     logger.critical("BWS_CACHE_URL not set")
     sys.exit(1)
@@ -29,27 +32,6 @@ class SecretResponse:
     status_code: int
 
 
-class BwscClient:
-    def __init__(self, token: str):
-        self.token = token
-
-    def get_secret_by_id(self, secret_id: str):
-        value = requests.get(
-            f"{BWSC_URL}/id/{secret_id}",
-            headers={"Authorization": f"Bearer {self.token}"},
-            timeout=1,
-        )
-        return SecretResponse(value=value.text, status_code=value.status_code)
-
-    def get_secret_by_key(self, secret_key: str):
-        value = requests.get(
-            f"{BWSC_URL}/key/{secret_key}",
-            headers={"Authorization": f"Bearer {self.token}"},
-            timeout=1,
-        )
-        return SecretResponse(value=value.text, status_code=value.status_code)
-
-
 @dataclass
 class CachedSecret:
     value: SecretResponse
@@ -58,66 +40,92 @@ class CachedSecret:
 
 class BwscCachedClient:
     def __init__(self, token: str, prom_clien: PromMetricsClient):
+        self.token = token
         self.prom_client = prom_clien
-        self.client = self.make_client(token)
-        self.secret_id_cache: dict[str, CachedSecret] = {}
-        self.secret_key_cache: dict[str, CachedSecret] = {}
+        self.endpoint_cache: dict[str, CachedSecret] = {}
+        self.endpoint_cache_lock = threading.Lock()
+        if BACKGROUND_REFRESH:
+            self.refresh_thread = threading.Thread(target=self._refresh_loop)
+            self.refresh_thread.daemon = True
+            self.refresh_thread.start()
 
-    @staticmethod
-    def make_client(token: str):
-        return BwscClient(token)
+    def _refresh_loop(self):
+        while True:
+            min_sleep = None
+            expired_endpoints = []
+            with self.endpoint_cache_lock:
+                for url, cached_secret in self.endpoint_cache.items():
+                    current_time = time.time()
+                    time_till_expire = SECRET_TTL - (
+                        current_time - cached_secret.last_requested
+                    )
+                    if time_till_expire < 0:
+                        expired_endpoints.append(url)
+                    elif min_sleep is None or time_till_expire < min_sleep:
+                        min_sleep = time_till_expire
+            for url in expired_endpoints:
+                endpoint, secret_id = url.split("/")
+                self.refresh_endpoint(endpoint, secret_id)
+            if min_sleep is not None:
+                time.sleep(min_sleep)
 
     def reset_cache(self):
-        before = CacheStats(
-            secret_cache_size=len(self.secret_id_cache),
-            keymap_cache_size=len(self.secret_key_cache),
-        )
-        self.secret_id_cache = {}
-        self.secret_key_cache = {}
+        before = self.stats()
+        self.endpoint_cache = {}
         return before
 
-    def get_secret_by_id(self, secret_id: str):
-        cached_secret = None
-        if secret_id in self.secret_id_cache:
-            cached_secret = self.secret_id_cache[secret_id]
-            if cached_secret.last_requested + SECRET_TTL > time.time():
-                self.prom_client.tick_cache_hits("id")
-                return cached_secret.value
-        self.prom_client.tick_cache_miss("id")
+    def refresh_endpoint(self, endpoint: str, secret_id: str):
+        self.prom_client.tick_cache_miss(endpoint)
+        url = f"{endpoint}/{secret_id}"
         try:
-            value = self.client.get_secret_by_id(secret_id)
+            result = requests.get(
+                f"{BWSC_URL}/{url}",
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=1,
+            )
+            value = SecretResponse(value=result.text, status_code=result.status_code)
+
         except requests.exceptions.RequestException:
-            if KEEP_ON_CONN_FAIL and cached_secret:
-                value = cached_secret.value
+            if KEEP_ON_CONN_FAIL and url in self.endpoint_cache:
+                value = self.endpoint_cache[url].value
             else:
                 value = SecretResponse(value="cannot connect to bwsc", status_code=500)
         cached_secret = CachedSecret(value=value, last_requested=time.time())
-        self.secret_id_cache[secret_id] = cached_secret
+        with self.endpoint_cache_lock:
+            self.endpoint_cache[url] = cached_secret
         return cached_secret.value
+
+    def get_endpoint(self, endpoint: str, secret_id: str):
+        url = f"{endpoint}/{secret_id}"
+        with self.endpoint_cache_lock:
+            if url in self.endpoint_cache:
+                cached_secret = self.endpoint_cache[url]
+                if (
+                    cached_secret.last_requested + SECRET_TTL > time.time()
+                    or BACKGROUND_REFRESH
+                ):
+                    self.prom_client.tick_cache_hits(endpoint)
+                    return cached_secret.value
+        return self.refresh_endpoint(endpoint, secret_id)
+
+    def get_secret_by_id(self, secret_id: str):
+        return self.get_endpoint("id", secret_id)
 
     def get_secret_by_key(self, secret_key: str):
-        cached_secret = None
-        if secret_key in self.secret_key_cache:
-            cached_secret = self.secret_key_cache[secret_key]
-            if cached_secret.last_requested + SECRET_TTL > time.time():
-                self.prom_client.tick_cache_hits("key")
-                return cached_secret.value
-        self.prom_client.tick_cache_miss("key")
-        try:
-            value = self.client.get_secret_by_key(secret_key)
-        except requests.exceptions.RequestException:
-            if KEEP_ON_CONN_FAIL and cached_secret:
-                value = cached_secret.value
-            else:
-                value = SecretResponse(value="cannot connect to bwsc", status_code=500)
-        cached_secret = CachedSecret(value=value, last_requested=time.time())
-        self.secret_key_cache[secret_key] = cached_secret
-        return cached_secret.value
+        return self.get_endpoint("key", secret_key)
 
     def stats(self):
+        secret_key_count = 0
+        secret_id_count = 0
+        for url, cached_secret in self.endpoint_cache.items():
+            if cached_secret.value.status_code == 200:
+                if "key/" in url:
+                    secret_key_count += 1
+                elif "id/" in url:
+                    secret_id_count += 1
         return CacheStats(
-            secret_cache_size=len(self.secret_id_cache),
-            keymap_cache_size=len(self.secret_key_cache),
+            secret_cache_size=secret_id_count,
+            keymap_cache_size=secret_key_count,
         )
 
 
